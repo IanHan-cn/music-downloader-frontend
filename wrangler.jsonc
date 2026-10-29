@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "music-downloader-web",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-29",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    // 注意：API_BASE_URL / API_TOKEN 不放这里，避免与 secret 同名冲突。
+    //   本地：写入 .dev.vars（参考 .dev.vars.example）
+    //   生产：npx wrangler secret put API_BASE_URL
+    // 拼接在 API_BASE_URL 之后的路径，例如 /process
+    "API_PATH": "/modify/flac",
+    // 允许页面临时覆盖后端地址（调试用）。生产环境务必设为 "false"，否则存在 SSRF 风险
+    "ALLOW_API_OVERRIDE": "false",
+    // 代理请求超时时间（毫秒）
+    "API_TIMEOUT_MS": "120000",
+    // 单页面最大并发请求数
+    "MAX_CONCURRENCY": "2"
+  },
+  // 显式关闭 workers.dev 和预览链接
+  "workers_dev": false,
+  "preview_urls": false,
+  // 配置自定义域
+  "routes": [
+    {
+      "pattern": "music.hanyi.online",
+      "custom_domain": true
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# 复制为 .dev.vars 后填入真实值（.dev.vars 仅用于本地 wrangler dev）
+API_BASE_URL=https://your-backend.example.com
+
+API_PATH=
+# 后端若需要鉴权，填入后 Worker 会附带 Authorization: Bearer <token>
+API_TOKEN=
