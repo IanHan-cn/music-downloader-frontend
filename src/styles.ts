@@ -447,8 +447,74 @@ kbd {
 .toast.ok { border-color: rgba(18, 185, 129, .35); }
 
 @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 @keyframes slide { 0% { left: -40%; } 100% { left: 100%; } }
+
+/* ---------- Settings blocks ---------- */
+.panel-block + .panel-block {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.panel-block h4 { margin: 0 0 4px; font-size: 13.5px; font-weight: 620; }
+.block-desc { margin: 0 0 12px; font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  margin-bottom: 12px;
+}
+.switch-row strong { display: block; font-size: 13.5px; font-weight: 600; }
+.switch-row small { display: block; font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
+
+.switch {
+  position: relative;
+  width: 44px; height: 26px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background .18s ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
+  transition: transform .18s ease;
+}
+.switch[aria-checked="true"] { background: linear-gradient(135deg, var(--brand), var(--brand-2)); }
+.switch[aria-checked="true"]::after { transform: translateX(18px); }
+
+.hidden { display: none !important; }
+.aria-only { display: none; }
+.aria-only.show { display: block; animation: fadeUp .2s ease; }
+
+.spinner {
+  width: 14px; height: 14px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .45);
+  border-top-color: #fff;
+  animation: spin .7s linear infinite;
+}
+.btn-ghost .spinner { border-color: var(--border-strong); border-top-color: var(--brand); }
+
+.badge svg { width: 12px; height: 12px; flex: 0 0 auto; }
+.badge-push { background: var(--brand-soft); color: var(--brand); }
+.task-note { font-size: 11.5px; color: var(--text-3); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 @media (max-width: 620px) {
   .wrap { padding: 28px 14px 64px; }

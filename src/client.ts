@@ -17,6 +17,15 @@ export const CLIENT_JS = String.raw`
   var apiOverride = prefs.apiBaseUrl || '';
   var allowOverride = CONFIG.allowApiOverride === true;
   var tasks = [];
+  var batchBusy = false;
+
+  var aria = {
+    enabled: (prefs.aria && prefs.aria.enabled) === true,
+    endpoint: (prefs.aria && prefs.aria.endpoint) || 'http://127.0.0.1:6800/jsonrpc',
+    secret: (prefs.aria && prefs.aria.secret) || '',
+    dir: (prefs.aria && prefs.aria.dir) || '',
+    referer: (prefs.aria && prefs.aria.referer) || ''
+  };
 
   /* ---------------- DOM ---------------- */
   var el = {
@@ -32,12 +41,20 @@ export const CLIENT_JS = String.raw`
     stats: document.getElementById('stats'),
     clearDone: document.getElementById('clear-done'),
     retryFailed: document.getElementById('retry-failed'),
+    batch: document.getElementById('batch-download'),
     settingsBtn: document.getElementById('settings-btn'),
     settings: document.getElementById('settings'),
     apiInput: document.getElementById('api-base'),
     apiRow: document.getElementById('api-row'),
     concInput: document.getElementById('concurrency'),
     saveSettings: document.getElementById('save-settings'),
+    ariaSwitch: document.getElementById('aria-enabled'),
+    ariaConfig: document.getElementById('aria-config'),
+    ariaEndpoint: document.getElementById('aria-endpoint'),
+    ariaSecret: document.getElementById('aria-secret'),
+    ariaDir: document.getElementById('aria-dir'),
+    ariaReferer: document.getElementById('aria-referer'),
+    ariaTest: document.getElementById('aria-test'),
     toasts: document.getElementById('toasts')
   };
 
@@ -217,6 +234,9 @@ export const CLIENT_JS = String.raw`
     t.status = 'queued';
     t.message = '排队中';
     t.expired = false;
+    t.pushed = false;
+    t.gid = '';
+    t.pushError = '';
     render();
     pump();
   }
@@ -314,6 +334,156 @@ export const CLIENT_JS = String.raw`
     }
   }
 
+  /* ---------------- Aria2 JSON-RPC ---------------- */
+  function withSecret(params) {
+    return aria.secret ? ['token:' + aria.secret].concat(params) : params;
+  }
+
+  function aria2Call(method, params) {
+    var body = JSON.stringify({ jsonrpc: '2.0', id: uid(), method: method, params: params || [] });
+    return fetch(aria.endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: body
+    })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json().catch(function () { throw new Error('aria2 返回的不是 JSON'); });
+      })
+      .then(function (data) {
+        if (!data) throw new Error('aria2 返回内容为空');
+        if (data.error) throw new Error(data.error.message || 'aria2 返回错误');
+        return data.result;
+      });
+  }
+
+  function aria2Options(t) {
+    var opts = { out: buildFileName(t) };
+    if (aria.dir) opts.dir = aria.dir;
+    if (aria.referer) opts.header = ['Referer: ' + aria.referer];
+    return opts;
+  }
+
+  function aria2Add(t) {
+    return aria2Call('aria2.addUri', withSecret([[t.download_url], aria2Options(t)]));
+  }
+
+  function canPush(t) {
+    if (!aria.enabled) return false;
+    if (t.status !== 'done' || !t.download_url) return false;
+    if (t.expired || (t.expireAt && Date.now() > t.expireAt)) return false;
+    return !t.pushed;
+  }
+
+  function pushable() {
+    return tasks.filter(function (t) { return canPush(t); });
+  }
+
+  function pushOne(t) {
+    if (t.busy) return;
+    t.busy = true;
+    render();
+    aria2Add(t)
+      .then(function (gid) {
+        t.pushed = true;
+        t.gid = gid || '';
+        t.pushError = '';
+        toast('已加入 aria2：' + buildFileName(t), 'ok');
+      })
+      .catch(function (err) {
+        t.pushError = msgOf(err);
+        toast('推送失败：' + msgOf(err), 'err');
+      })
+      .then(function () {
+        t.busy = false;
+        render();
+        save();
+        renderStats();
+      });
+  }
+
+  // 串行推送，避免瞬间向 aria2 灌入大量请求
+  function pushBatch() {
+    if (batchBusy) return;
+    var queue = pushable();
+    if (!queue.length) {
+      toast('暂无可推送的任务（需先生成下载链接）', 'err');
+      return;
+    }
+    batchBusy = true;
+    renderStats();
+    render();
+
+    var okCount = 0;
+    var failed = [];
+
+    (function next() {
+      if (!queue.length) {
+        batchBusy = false;
+        render();
+        renderStats();
+        toast(failed.length
+          ? '推送完成：成功 ' + okCount + ' 个，失败 ' + failed.length + ' 个'
+          : '已把 ' + okCount + ' 个任务加入 aria2', failed.length ? 'err' : 'ok');
+        return;
+      }
+      var t = queue.shift();
+      aria2Add(t)
+        .then(function (gid) { t.pushed = true; t.gid = gid || ''; t.pushError = ''; okCount++; })
+        .catch(function (err) { t.pushError = msgOf(err); failed.push(t); })
+        .then(function () { render(); save(); next(); });
+    })();
+  }
+
+  function testAria2() {
+    el.ariaTest.disabled = true;
+    setBusyLabel(el.ariaTest, true);
+    aria2Call('aria2.getVersion', withSecret([]))
+      .then(function (res) {
+        toast('连接成功 · aria2 ' + ((res && res.version) || ''), 'ok');
+      })
+      .catch(function (err) {
+        toast('连接失败：' + msgOf(err) + ' · 请确认已开启 --rpc-allow-origin-all', 'err');
+      })
+      .then(function () {
+        el.ariaTest.disabled = false;
+        setBusyLabel(el.ariaTest, false);
+      });
+  }
+
+  function setBusyLabel(btn, busy) {
+    var span = btn.querySelector('span');
+    var old = btn.querySelector('.spinner');
+    if (old) old.remove();
+    if (busy) {
+      var sp = document.createElement('span');
+      sp.className = 'spinner';
+      btn.insertBefore(sp, span);
+    }
+    if (span) span.textContent = busy ? '测试中…' : '测试 Aria2 连接';
+  }
+
+  function applyAriaUI() {
+    el.ariaSwitch.setAttribute('aria-checked', aria.enabled ? 'true' : 'false');
+    el.ariaConfig.classList.toggle('show', aria.enabled);
+    el.ariaTest.classList.toggle('hidden', !aria.enabled);
+    el.batch.classList.toggle('hidden', !aria.enabled);
+  }
+
+  function persistAria() {
+    aria.endpoint = (el.ariaEndpoint.value || '').trim();
+    aria.secret = (el.ariaSecret.value || '').trim();
+    aria.dir = (el.ariaDir.value || '').trim();
+    aria.referer = (el.ariaReferer.value || '').trim();
+    prefs.aria = {
+      enabled: aria.enabled,
+      endpoint: aria.endpoint,
+      secret: aria.secret,
+      dir: aria.dir,
+      referer: aria.referer
+    };
+  }
+
   /* ---------------- 渲染 ---------------- */
   function render() {
     var html = '';
@@ -333,6 +503,13 @@ export const CLIENT_JS = String.raw`
       '<span class="stat is-err">失败 <b>' + s.error + '</b></span>';
     el.clearDone.disabled = s.done + s.error === 0;
     el.retryFailed.disabled = s.error === 0;
+
+    if (aria.enabled) {
+      var pend = pushable().length;
+      el.batch.disabled = batchBusy || pend === 0;
+      var label = el.batch.querySelector('span');
+      if (label) label.textContent = batchBusy ? '推送中…' : ('批量下载' + (pend ? ' (' + pend + ')' : ''));
+    }
   }
 
   function renderTask(t) {
@@ -347,8 +524,14 @@ export const CLIENT_JS = String.raw`
     else if (t.status === 'done') {
       if (t.expired || (t.expireAt && Date.now() > t.expireAt)) {
         side = '<span class="badge badge-out">链接已过期</span>' + actionBtn(t.id, 'retry', '重新生成', 'btn-ok', ICON_REFRESH) + actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
+      } else if (t.pushed) {
+        side = '<span class="badge badge-push" title="GID: ' + esc(t.gid || '-') + '">' + ICON_CHECK + '<span>已加入 aria2</span></span>' +
+               actionBtn(t.id, 'download', '浏览器下载', 'btn-ghost btn-icon', ICON_DOWNLOAD) +
+               actionBtn(t.id, 'copy', '复制链接', 'btn-ghost btn-icon', ICON_COPY) +
+               actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
       } else {
         side = actionBtn(t.id, 'download', t.busy ? '准备中' : '下载', 'btn-primary', ICON_DOWNLOAD, !!t.busy) +
+               (aria.enabled ? actionBtn(t.id, 'push', '加入 aria2', 'btn-ghost btn-icon', ICON_ARIA, !!t.busy) : '') +
                actionBtn(t.id, 'copy', '复制链接', 'btn-ghost btn-icon', ICON_COPY) +
                actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
       }
@@ -357,14 +540,15 @@ export const CLIENT_JS = String.raw`
     }
 
     var bar = t.status === 'running' ? '<div class="bar"><i></i></div>' : '';
-    var msgCls = 'task-msg' + (t.status === 'error' ? ' is-err' : '');
+    var msg = t.pushError && !t.pushed ? '推送失败：' + t.pushError : t.message;
+    var msgCls = 'task-msg' + (t.status === 'error' || (t.pushError && !t.pushed) ? ' is-err' : '');
     var meta = [t.artist, t.album].filter(Boolean).join(' · ') || t.file_url;
 
     return '<div class="' + cls + '">' + cover +
       '<div class="task-main">' +
         '<div class="task-title" title="' + esc(t.title) + '">' + esc(t.title) + '</div>' +
         '<div class="task-meta" title="' + esc(meta) + '">' + esc(meta) + '</div>' +
-        '<div class="' + msgCls + '" title="' + esc(t.message) + '">' + esc(t.message) + '</div>' +
+        '<div class="' + msgCls + '" title="' + esc(msg) + '">' + esc(msg) + '</div>' +
       '</div>' +
       '<div class="task-side">' + side +
         (t.status === 'done' && !t.expired ? '<span class="expire" data-expire="' + t.id + '">' + expireText(t) + '</span>' : '') +
@@ -415,6 +599,11 @@ export const CLIENT_JS = String.raw`
     var m = Math.floor(sec / 60), s = sec % 60;
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
+  function msgOf(err) {
+    if (!err) return '未知错误';
+    if (typeof err === 'string') return err;
+    return err.message || String(err);
+  }
   function find(id) {
     for (var i = 0; i < tasks.length; i++) if (tasks[i].id === id) return tasks[i];
     return null;
@@ -443,7 +632,8 @@ export const CLIENT_JS = String.raw`
             id: t.id, title: t.title, artist: t.artist, album: t.album,
             cover_url: t.cover_url, file_url: t.file_url, raw: t.raw,
             status: t.status, download_url: t.download_url, message: t.message,
-            createdAt: t.createdAt, expireAt: t.expireAt
+            createdAt: t.createdAt, expireAt: t.expireAt,
+            pushed: !!t.pushed, gid: t.gid || ''
           };
         });
       localStorage.setItem(STORE_KEY, JSON.stringify(data));
@@ -501,12 +691,25 @@ export const CLIENT_JS = String.raw`
     var act = btn.getAttribute('data-act');
     if (act === 'download') triggerDownload(t);
     else if (act === 'copy') copyLink(t);
+    else if (act === 'push') pushOne(t);
     else if (act === 'retry') retry(t.id);
     else if (act === 'remove') remove(t.id);
   });
 
   el.clearDone.addEventListener('click', clearFinished);
   el.retryFailed.addEventListener('click', retryFailed);
+  el.batch.addEventListener('click', pushBatch);
+  el.ariaTest.addEventListener('click', testAria2);
+
+  el.ariaSwitch.addEventListener('click', function () {
+    aria.enabled = !aria.enabled;
+    persistAria();
+    savePrefs();
+    applyAriaUI();
+    renderStats();
+    render();
+    toast(aria.enabled ? '已启用 Aria2 批量下载' : '已关闭 Aria2 批量下载', 'ok');
+  });
 
   el.settingsBtn.addEventListener('click', function () {
     el.settings.classList.toggle('show');
@@ -517,6 +720,7 @@ export const CLIENT_JS = String.raw`
     concurrency = clampInt(el.concInput.value, 1, 5, 2);
     prefs.apiBaseUrl = apiOverride;
     prefs.concurrency = concurrency;
+    persistAria();
     savePrefs();
     toast('设置已保存', 'ok');
     pump();
@@ -582,9 +786,14 @@ export const CLIENT_JS = String.raw`
   load();
   el.apiInput.value = apiOverride;
   el.concInput.value = String(concurrency);
+  el.ariaEndpoint.value = aria.endpoint;
+  el.ariaSecret.value = aria.secret;
+  el.ariaDir.value = aria.dir;
+  el.ariaReferer.value = aria.referer;
   if (!allowOverride) {
     el.apiRow.style.display = 'none';
   }
+  applyAriaUI();
   render();
   el.input.focus();
 })();

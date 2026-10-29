@@ -25,6 +25,9 @@ const svg = (body: string): string =>
 const ICONS = {
   music: svg('<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>'),
   download: svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'),
+  batch: svg('<path d="M12 13v8"/><polyline points="8 17 12 21 16 17"/><path d="M20.4 14.9A5 5 0 0 0 18 6h-1.3A7 7 0 1 0 5 12.3"/>'),
+  zap: svg('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>'),
+  check: svg('<polyline points="20 6 9 17 4 12"/>'),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
   refresh: svg('<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>'),
   close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
@@ -64,6 +67,8 @@ export function renderPage(env: PageEnv): string {
     `var ICON_COPY = ${JSON.stringify(ICONS.copy)};`,
     `var ICON_REFRESH = ${JSON.stringify(ICONS.refresh)};`,
     `var ICON_X = ${JSON.stringify(ICONS.close)};`,
+    `var ICON_ARIA = ${JSON.stringify(ICONS.zap)};`,
+    `var ICON_CHECK = ${JSON.stringify(ICONS.check)};`,
     ''
   ].join('\n');
 
@@ -94,17 +99,56 @@ export function renderPage(env: PageEnv): string {
 
     <section class="card panel" id="settings">
       <h3>运行设置</h3>
-      <div class="field" id="api-row">
-        <label for="api-base">临时后端地址（调试用，留空则使用 Worker 环境变量）</label>
-        <input id="api-base" type="url" placeholder="https://your-backend.example.com" autocomplete="off" />
-        <small>仅在 Worker 开启 ALLOW_API_OVERRIDE 时生效，配置保存在本地浏览器。</small>
+
+      <div class="panel-block">
+        <div class="field" id="api-row">
+          <label for="api-base">临时后端地址（调试用，留空则使用 Worker 环境变量）</label>
+          <input id="api-base" type="url" placeholder="https://your-backend.example.com" autocomplete="off" />
+          <small>仅在 Worker 开启 ALLOW_API_OVERRIDE 时生效，配置保存在本地浏览器。</small>
+        </div>
+        <div class="field">
+          <label for="concurrency">最大并发处理数（1–5）</label>
+          <input id="concurrency" type="number" min="1" max="5" step="1" value="${config.maxConcurrency}" />
+          <small>等待期间可继续提交新文本，任务按顺序排队处理。</small>
+        </div>
       </div>
-      <div class="field">
-        <label for="concurrency">最大并发处理数（1–5）</label>
-        <input id="concurrency" type="number" min="1" max="5" step="1" value="${config.maxConcurrency}" />
-        <small>等待期间可继续提交新文本，任务按顺序排队处理。</small>
+
+      <div class="panel-block">
+        <h4>Aria2 批量下载</h4>
+        <p class="block-desc">启用后，队列工具栏会出现「批量下载」，通过 JSON-RPC 把已生成的链接一次性推送给 aria2。</p>
+        <div class="switch-row">
+          <div class="sr-text">
+            <strong>启用 JSON-RPC 批量下载</strong>
+            <small>浏览器直连 aria2 RPC，配置保存在本地浏览器</small>
+          </div>
+          <button class="switch" id="aria-enabled" type="button" role="switch" aria-checked="false" aria-label="启用 Aria2 批量下载"></button>
+        </div>
+
+        <div class="aria-only" id="aria-config">
+          <div class="field">
+            <label for="aria-endpoint">JSON-RPC 端点</label>
+            <input id="aria-endpoint" type="url" placeholder="http://127.0.0.1:6800/jsonrpc" autocomplete="off" />
+            <small>aria2 需带 <code>--enable-rpc --rpc-allow-origin-all</code> 启动，否则浏览器会被同源策略拦截。</small>
+          </div>
+          <div class="field">
+            <label for="aria-secret">RPC 密钥（rpc-secret）</label>
+            <input id="aria-secret" type="password" autocomplete="off" placeholder="未设置 --rpc-secret 时留空" />
+          </div>
+          <div class="field">
+            <label for="aria-dir">下载目录（可选）</label>
+            <input id="aria-dir" autocomplete="off" placeholder="留空则使用 aria2 默认目录" />
+          </div>
+          <div class="field">
+            <label for="aria-referer">Referer 请求头（可选）</label>
+            <input id="aria-referer" autocomplete="off" placeholder="留空则不发送 Referer" />
+          </div>
+        </div>
       </div>
-      <button class="btn btn-primary" id="save-settings" type="button">${ICONS.send}<span>保存设置</span></button>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px">
+        <button class="btn btn-primary" id="save-settings" type="button">${ICONS.send}<span>保存设置</span></button>
+        <button class="btn btn-ghost hidden" id="aria-test" type="button">${ICONS.check}<span>测试 Aria2 连接</span></button>
+      </div>
     </section>
 
     <section class="card composer">
@@ -128,7 +172,8 @@ export function renderPage(env: PageEnv): string {
         <h2>下载队列</h2>
         <div class="stats" id="stats"></div>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary hidden" id="batch-download" type="button" disabled>${ICONS.batch}<span>批量下载</span></button>
         <button class="btn btn-ghost" id="retry-failed" type="button" disabled>${ICONS.refresh}<span>重试失败</span></button>
         <button class="btn btn-ghost" id="clear-done" type="button" disabled>清除已完成</button>
       </div>
