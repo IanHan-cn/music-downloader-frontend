@@ -514,6 +514,34 @@ kbd {
 
 .badge svg { width: 12px; height: 12px; flex: 0 0 auto; }
 .badge-push { background: var(--brand-soft); color: var(--brand); }
+
+/* Aria2 自动连接检测状态条 */
+.aria-status {
+  display: none;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.aria-status.show { display: flex; animation: fadeUp .2s ease; }
+.aria-status svg { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 2px; }
+.aria-status .spinner { margin-top: 2px; border-color: var(--border-strong); border-top-color: var(--brand); }
+.aria-status.is-ok {
+  background: var(--ok-soft);
+  border-color: rgba(18, 185, 129, .28);
+  color: var(--ok);
+}
+.aria-status.is-err {
+  background: var(--err-soft);
+  border-color: rgba(239, 68, 68, .28);
+  color: var(--err);
+}
 .task-note { font-size: 11.5px; color: var(--text-3); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 @media (max-width: 620px) {

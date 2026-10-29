@@ -54,7 +54,7 @@ export const CLIENT_JS = String.raw`
     ariaSecret: document.getElementById('aria-secret'),
     ariaDir: document.getElementById('aria-dir'),
     ariaReferer: document.getElementById('aria-referer'),
-    ariaTest: document.getElementById('aria-test'),
+    ariaStatus: document.getElementById('aria-status'),
     toasts: document.getElementById('toasts')
   };
 
@@ -335,13 +335,15 @@ export const CLIENT_JS = String.raw`
   }
 
   /* ---------------- Aria2 JSON-RPC ---------------- */
-  function withSecret(params) {
-    return aria.secret ? ['token:' + aria.secret].concat(params) : params;
-  }
-
-  function aria2Call(method, params) {
-    var body = JSON.stringify({ jsonrpc: '2.0', id: uid(), method: method, params: params || [] });
-    return fetch(aria.endpoint, {
+  // override 非空时用它（页面实时输入），否则用已保存的配置
+  function aria2Call(method, params, override) {
+    var endpoint = override && override.endpoint ? override.endpoint : aria.endpoint;
+    var secret = override ? override.secret : aria.secret;
+    var body = JSON.stringify({
+      jsonrpc: '2.0', id: uid(), method: method,
+      params: secret ? ['token:' + secret].concat(params || []) : (params || [])
+    });
+    return fetch(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: body
@@ -365,7 +367,7 @@ export const CLIENT_JS = String.raw`
   }
 
   function aria2Add(t) {
-    return aria2Call('aria2.addUri', withSecret([[t.download_url], aria2Options(t)]));
+    return aria2Call('aria2.addUri', [[t.download_url], aria2Options(t)]);
   }
 
   function canPush(t) {
@@ -436,38 +438,72 @@ export const CLIENT_JS = String.raw`
   }
 
   function testAria2() {
-    el.ariaTest.disabled = true;
-    setBusyLabel(el.ariaTest, true);
-    aria2Call('aria2.getVersion', withSecret([]))
+    setAriaStatus('pending');
+    aria2Call('aria2.getVersion', [], currentAriaInput())
       .then(function (res) {
-        toast('连接成功 · aria2 ' + ((res && res.version) || ''), 'ok');
+        setAriaStatus('ok', (res && res.version) || '');
+        toast('Aria2 连接成功', 'ok');
       })
       .catch(function (err) {
-        toast('连接失败：' + msgOf(err) + ' · 请确认已开启 --rpc-allow-origin-all', 'err');
-      })
-      .then(function () {
-        el.ariaTest.disabled = false;
-        setBusyLabel(el.ariaTest, false);
+        setAriaStatus('err', msgOf(err));
       });
   }
 
-  function setBusyLabel(btn, busy) {
-    var span = btn.querySelector('span');
-    var old = btn.querySelector('.spinner');
-    if (old) old.remove();
-    if (busy) {
-      var sp = document.createElement('span');
-      sp.className = 'spinner';
-      btn.insertBefore(sp, span);
+  // 直接读取输入框当前值，不等用户点保存
+  function currentAriaInput() {
+    return {
+      endpoint: (el.ariaEndpoint.value || '').trim(),
+      secret: (el.ariaSecret.value || '').trim()
+    };
+  }
+
+  var ariaTestTimer = null;
+  var ariaTestSeq = 0;
+
+  function scheduleAriaTest() {
+    if (!aria.enabled) return;
+    var cfg = currentAriaInput();
+    if (!cfg.endpoint) {
+      ariaTestSeq++;
+      if (ariaTestTimer) { clearTimeout(ariaTestTimer); ariaTestTimer = null; }
+      setAriaStatus('empty');
+      return;
     }
-    if (span) span.textContent = busy ? '测试中…' : '测试 Aria2 连接';
+    setAriaStatus('pending');
+    var seq = ++ariaTestSeq;
+    if (ariaTestTimer) clearTimeout(ariaTestTimer);
+    ariaTestTimer = window.setTimeout(function () {
+      if (seq !== ariaTestSeq) return;
+      testAria2();
+    }, 600);
+  }
+
+  function setAriaStatus(state, detail) {
+    if (!el.ariaStatus) return;
+    var cls = { ok: 'is-ok', err: 'is-err', empty: 'is-empty', pending: 'is-pending' }[state] || 'is-pending';
+    el.ariaStatus.className = 'aria-status show ' + cls;
+    if (state === 'pending') {
+      el.ariaStatus.innerHTML = '<span class="spinner"></span><span>正在连接 aria2…</span>';
+    } else if (state === 'ok') {
+      el.ariaStatus.innerHTML = ICON_CHECK + '<span>已连接 · aria2 ' + esc(detail || '') + '</span>';
+    } else if (state === 'empty') {
+      el.ariaStatus.innerHTML = '<span>填写端点后将自动检测连接</span>';
+    } else {
+      el.ariaStatus.innerHTML = ICON_X + '<span>连接失败：' + esc(detail || '') +
+        ' · 请确认已开启 --rpc-allow-origin-all</span>';
+    }
   }
 
   function applyAriaUI() {
     el.ariaSwitch.setAttribute('aria-checked', aria.enabled ? 'true' : 'false');
     el.ariaConfig.classList.toggle('show', aria.enabled);
-    el.ariaTest.classList.toggle('hidden', !aria.enabled);
     el.batch.classList.toggle('hidden', !aria.enabled);
+    if (!aria.enabled && ariaTestTimer) {
+      clearTimeout(ariaTestTimer);
+      ariaTestTimer = null;
+      ariaTestSeq++;
+      setAriaStatus('empty');
+    }
   }
 
   function persistAria() {
@@ -699,7 +735,10 @@ export const CLIENT_JS = String.raw`
   el.clearDone.addEventListener('click', clearFinished);
   el.retryFailed.addEventListener('click', retryFailed);
   el.batch.addEventListener('click', pushBatch);
-  el.ariaTest.addEventListener('click', testAria2);
+
+  el.ariaEndpoint.addEventListener('input', scheduleAriaTest);
+  el.ariaSecret.addEventListener('input', scheduleAriaTest);
+  el.ariaEndpoint.addEventListener('blur', function () { if (aria.enabled) testAria2(); });
 
   el.ariaSwitch.addEventListener('click', function () {
     aria.enabled = !aria.enabled;
@@ -708,6 +747,7 @@ export const CLIENT_JS = String.raw`
     applyAriaUI();
     renderStats();
     render();
+    if (aria.enabled) testAria2();
     toast(aria.enabled ? '已启用 Aria2 批量下载' : '已关闭 Aria2 批量下载', 'ok');
   });
 
@@ -795,6 +835,7 @@ export const CLIENT_JS = String.raw`
   }
   applyAriaUI();
   render();
+  if (aria.enabled) scheduleAriaTest();
   el.input.focus();
 })();
 `;

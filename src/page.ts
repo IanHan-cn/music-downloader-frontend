@@ -128,7 +128,7 @@ export function renderPage(env: PageEnv): string {
           <div class="field">
             <label for="aria-endpoint">JSON-RPC 端点</label>
             <input id="aria-endpoint" type="url" placeholder="http://127.0.0.1:6800/jsonrpc" autocomplete="off" />
-            <small>aria2 需带 <code>--enable-rpc --rpc-allow-origin-all</code> 启动，否则浏览器会被同源策略拦截。</small>
+            <small>aria2 需带 <code>--enable-rpc --rpc-allow-origin-all</code> 启动。填写后自动检测连接，结果见下方状态。</small>
           </div>
           <div class="field">
             <label for="aria-secret">RPC 密钥（rpc-secret）</label>
@@ -142,12 +142,13 @@ export function renderPage(env: PageEnv): string {
             <label for="aria-referer">Referer 请求头（可选）</label>
             <input id="aria-referer" autocomplete="off" placeholder="留空则不发送 Referer" />
           </div>
+
+          <div class="aria-status" id="aria-status" role="status" aria-live="polite"></div>
         </div>
       </div>
 
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px">
         <button class="btn btn-primary" id="save-settings" type="button">${ICONS.send}<span>保存设置</span></button>
-        <button class="btn btn-ghost hidden" id="aria-test" type="button">${ICONS.check}<span>测试 Aria2 连接</span></button>
       </div>
     </section>
 
