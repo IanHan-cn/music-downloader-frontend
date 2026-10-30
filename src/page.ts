@@ -153,7 +153,7 @@ export function renderPage(env: PageEnv): string {
     </section>
 
     <section class="card composer">
-      <textarea id="input" spellcheck="false" placeholder="在此粘贴曲目信息，例如：&#10;歌名：Asylums for the Feeling&#10;歌手：Silent Poets, Leila Adu&#10;专辑：Death Stranding&#10;歌曲链接：https://...&#10;封面链接：https://...&#10;&#10;支持一次粘贴多首，提交后可立即继续粘贴下一段。"></textarea>
+      <textarea id="input" spellcheck="false" placeholder="在此粘贴曲目信息，例如：&#10;歌名：淘汰&#10;歌手：陈奕迅&#10;专辑：认了吧&#10;时长：04:45&#10;歌曲链接：https://...&#10;封面链接：https://...&#10;&#10;也支持直接粘贴 JSON，例如 {&quot;name&quot;:&quot;淘汰&quot;,&quot;artist&quot;:&quot;陈奕迅&quot;,&quot;url&quot;:&quot;https://...&quot;,&quot;duration&quot;:285}&#10;可一次粘贴多首，提交后可立即继续粘贴下一段。"></textarea>
       <div class="preview" id="preview">
         <div class="preview-title" id="preview-title">识别结果</div>
         <div class="preview-row" id="preview-row"></div>

@@ -64,11 +64,45 @@ export const CLIENT_JS = String.raw`
     { key: 'artist', re: /^(?:歌\s*手|艺\s*人|演\s*唱(?:者)?|artists?|singer)$/i },
     { key: 'album', re: /^(?:专\s*辑|唱\s*片|album)$/i },
     { key: 'file_url', re: /^(?:歌曲\s*链接|下\s*载\s*链\s*接|文\s*件\s*链\s*接|音\s*乐\s*链\s*接|音频\s*链接|file[_-]?url|url|src)$/i, url: true },
-    { key: 'cover_url', re: /^(?:封面\s*链接|封\s*面|图\s*片|cover[_-]?url|cover|pic|picurl)$/i, url: true }
+    { key: 'cover_url', re: /^(?:封面\s*链接|封\s*面|图\s*片|cover[_-]?url|cover|pic|picurl)$/i, url: true },
+    { key: 'duration', re: /^(?:时\s*长|长\s*度|时\s*间|片\s*长|duration|length|time)$/i, number: true }
   ];
 
   function isUrl(v) { return typeof v === 'string' && /^https?:\/\/\S+$/i.test(v.trim()); }
   function safeUrl(v) { return isUrl(v) ? v.trim() : ''; }
+
+  // 时长归一化为秒：支持 285 / "285" / "07:07" / "1:02:03"，无法识别时返回 ''
+  function toSeconds(value) {
+    if (value === null || value === undefined || value === '') return '';
+    if (typeof value === 'number') return isFinite(value) && value >= 0 ? Math.round(value) : '';
+
+    var s = String(value).trim();
+    if (!s) return '';
+
+    var parts = s.split(':');
+    if (parts.length >= 2 && parts.length <= 3) {
+      var nums = [];
+      for (var i = 0; i < parts.length; i++) {
+        if (!/^\d{1,4}$/.test(parts[i].trim())) return '';
+        nums.push(parseInt(parts[i], 10));
+      }
+      // 首段（时或分）允许超过 59，其余段必须是合法的分/秒
+      for (var k = 1; k < nums.length; k++) {
+        if (nums[k] > 59) return '';
+      }
+      if (parts.length === 2) return nums[0] * 60 + nums[1];
+      return nums[0] * 3600 + nums[1] * 60 + nums[2];
+    }
+    if (/^\d+(\.\d+)?$/.test(s)) return Math.round(parseFloat(s));
+    return '';
+  }
+
+  // 歌手字段可能是数组
+  function arrayToText(v) {
+    if (Array.isArray(v)) return v.filter(Boolean).join(', ');
+    if (typeof v === 'string') return v;
+    return v === null || v === undefined ? '' : String(v);
+  }
 
   function splitBlocks(text) {
     var raw = String(text || '').replace(/\r\n/g, '\n').trim();
@@ -84,7 +118,7 @@ export const CLIENT_JS = String.raw`
   }
 
   function parseBlock(block) {
-    var out = { title: '', artist: '', album: '', file_url: '', cover_url: '', raw: block };
+    var out = { title: '', artist: '', album: '', file_url: '', cover_url: '', duration: '', raw: block };
     var lines = block.split('\n');
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
@@ -109,6 +143,8 @@ export const CLIENT_JS = String.raw`
         if (!r.re.test(label)) continue;
         if (r.url) {
           if (isUrl(value) && !out[r.key]) out[r.key] = safeUrl(value);
+        } else if (r.number) {
+          if (out[r.key] === '') out[r.key] = toSeconds(value);
         } else if (!out[r.key]) {
           out[r.key] = value;
         }
@@ -133,10 +169,11 @@ export const CLIENT_JS = String.raw`
           if (!item || typeof item !== 'object') continue;
           jsonSongs.push({
             title: item.name || item.title || '',
-            artist: item.artist || '',
+            artist: arrayToText(item.artist) || '',
             album: item.album || '',
             file_url: safeUrl(item.url || item.file_url || ''),
             cover_url: safeUrl(item.pic || item.cover_url || ''),
+            duration: toSeconds(item.duration),
             raw: JSON.stringify(item, null, 2)
           });
         }
@@ -176,6 +213,7 @@ export const CLIENT_JS = String.raw`
         album: s.album || '',
         cover_url: s.cover_url || '',
         file_url: s.file_url,
+        duration: s.duration === undefined ? '' : s.duration,
         raw: s.raw || '',
         status: 'queued',
         download_url: '',
@@ -214,6 +252,10 @@ export const CLIENT_JS = String.raw`
       artist: t.artist === UNKNOWN_ARTIST ? '' : t.artist,
       album: t.album
     };
+    // 时长仅在解析到时才附带，避免后端收到空值
+    if (t.duration !== '' && t.duration !== null && t.duration !== undefined) {
+      payload.duration = Number(t.duration);
+    }
     var headers = { 'content-type': 'application/json' };
     if (allowOverride && apiOverride) headers['x-api-base-url'] = apiOverride;
 
@@ -257,6 +299,7 @@ export const CLIENT_JS = String.raw`
       if (songs.length && !validate(songs[0])) {
         t.file_url = songs[0].file_url;
         t.cover_url = songs[0].cover_url;
+        if (songs[0].duration !== '' && songs[0].duration !== undefined) t.duration = songs[0].duration;
       }
     }
     t.status = 'queued';
@@ -606,7 +649,9 @@ export const CLIENT_JS = String.raw`
     var bar = t.status === 'running' ? '<div class="bar"><i></i></div>' : '';
     var msg = t.pushError && !t.pushed ? '推送失败：' + t.pushError : t.message;
     var msgCls = 'task-msg' + (t.status === 'error' || (t.pushError && !t.pushed) ? ' is-err' : '');
-    var meta = [t.artist, t.album].filter(Boolean).join(' · ') || t.file_url;
+    var metaParts = [t.artist, t.album].filter(Boolean);
+    if (hasDuration(t)) metaParts.push(fmtTime(Number(t.duration)));
+    var meta = metaParts.length ? metaParts.join(' · ') : t.file_url;
 
     return '<div class="' + cls + '">' + cover +
       '<div class="task-main">' +
@@ -663,6 +708,9 @@ export const CLIENT_JS = String.raw`
     var m = Math.floor(sec / 60), s = sec % 60;
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
+  function hasDuration(t) {
+    return t.duration !== '' && t.duration !== null && t.duration !== undefined;
+  }
   function msgOf(err) {
     if (!err) return '未知错误';
     if (typeof err === 'string') return err;
@@ -694,7 +742,7 @@ export const CLIENT_JS = String.raw`
         .map(function (t) {
           return {
             id: t.id, title: t.title, artist: t.artist, album: t.album,
-            cover_url: t.cover_url, file_url: t.file_url, raw: t.raw,
+            cover_url: t.cover_url, file_url: t.file_url, raw: t.raw, duration: t.duration,
             status: t.status, download_url: t.download_url, message: t.message,
             createdAt: t.createdAt, expireAt: t.expireAt,
             pushed: !!t.pushed, gid: t.gid || ''
@@ -827,6 +875,9 @@ export const CLIENT_JS = String.raw`
       html += '<span class="chip' + (bad ? ' missing' : '') + '">' + esc(s.title || UNKNOWN_TITLE) + '</span>';
       if (s.artist) html += '<span class="chip">' + esc(s.artist) + '</span>';
       if (s.album) html += '<span class="chip">' + esc(s.album) + '</span>';
+      if (s.duration !== '' && s.duration !== undefined) {
+        html += '<span class="chip url">' + esc(fmtTime(Number(s.duration))) + '</span>';
+      }
       html += s.file_url
         ? '<span class="chip url">' + esc(extFromUrl(s.file_url).toUpperCase() || 'LINK') + '</span>'
         : '<span class="chip missing">缺少歌曲链接</span>';

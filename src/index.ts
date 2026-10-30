@@ -83,22 +83,26 @@ async function handleProcess(request: Request, env: Env): Promise<Response> {
   if (typeof resolved !== 'string') return resolved; // 返回的是错误响应
 
   const timeoutMs = clampInt(env.API_TIMEOUT_MS, 1_000, 300_000, 120_000);
-  const body = JSON.stringify({
+
+  // duration 仅在解析到时才附带，避免后端收到空值
+  const body: Record<string, unknown> = {
     file_url: fileUrl,
     cover_url: normalizeUrl(payload.cover_url) ?? '',
     title: toText(payload.title),
     artist: toText(payload.artist),
     album: toText(payload.album)
-  });
+  };
+  const duration = toDuration(payload.duration);
+  if (duration !== null) body.duration = duration;
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(resolved, {
-      method: 'POST',
-      headers: buildHeaders(env),
-      body,
-      signal: AbortSignal.timeout(timeoutMs)
-    });
+    let upstream: Response;
+    try {
+      upstream = await fetch(resolved, {
+        method: 'POST',
+        headers: buildHeaders(env),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
   } catch (error) {
     const timeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
     return json(
@@ -209,6 +213,44 @@ function toText(value: unknown): string {
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return '';
+}
+
+/**
+ * 时长归一化为秒（整数）：接受 285、"285"、"07:07"、"1:02:03"。
+ * 无法识别或非正数时返回 null，调用方据此决定要不要带这个字段。
+ */
+function toDuration(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : null;
+  }
+  if (typeof value !== 'string') return null;
+
+  const text = value.trim();
+  if (!text) return null;
+
+  const parts = text.split(':');
+  if (parts.length === 2 || parts.length === 3) {
+    const nums: number[] = [];
+    for (const part of parts) {
+      if (!/^\d{1,4}$/.test(part.trim())) return null;
+      nums.push(Number.parseInt(part, 10));
+    }
+    // 首段（时或分）允许超过 59，其余段必须是合法的分/秒
+    for (let i = 1; i < nums.length; i++) {
+      if (nums[i] > 59) return null;
+    }
+    const total =
+      parts.length === 2 ? nums[0] * 60 + nums[1] : nums[0] * 3600 + nums[1] * 60 + nums[2];
+    return total > 0 ? total : null;
+  }
+
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const n = Number.parseFloat(text);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  }
+  return null;
 }
 
 function tryParseJson(text: string): unknown | null {
