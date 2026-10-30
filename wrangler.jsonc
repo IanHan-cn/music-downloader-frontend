@@ -19,7 +19,7 @@
     "ALLOW_API_OVERRIDE": "false",
     // 代理请求超时时间（毫秒）
     "API_TIMEOUT_MS": "120000",
-    // 单页面最大并发请求数
+    // 单页面并发上限（缺省 2）。页面可在 1~该值之间调整，上限完全由这里决定
     "MAX_CONCURRENCY": "2"
   },
   // 显式关闭 workers.dev 和预览链接

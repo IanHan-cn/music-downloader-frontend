@@ -56,7 +56,7 @@ const EMPTY_ART = `
 export function renderPage(env: PageEnv): string {
   const config = {
     allowApiOverride: env.ALLOW_API_OVERRIDE === 'true',
-    maxConcurrency: clampInt(env.MAX_CONCURRENCY, 1, 5, 2),
+    maxConcurrency: concurrencyLimit(env.MAX_CONCURRENCY),
     backendConfigured: Boolean(env.API_BASE_URL)
   };
 
@@ -93,7 +93,7 @@ export function renderPage(env: PageEnv): string {
         </div>
       </div>
       <div class="header-actions">
-        <button class="btn btn-ghost" id="settings-btn" type="button">${ICONS.sliders}<span>设置</span></button>
+        <button class="btn btn-ghost" id="settings-btn" type="button" aria-expanded="false" aria-controls="settings">${ICONS.sliders}<span>设置</span></button>
       </div>
     </header>
 
@@ -107,9 +107,9 @@ export function renderPage(env: PageEnv): string {
           <small>仅在 Worker 开启 ALLOW_API_OVERRIDE 时生效，配置保存在本地浏览器。</small>
         </div>
         <div class="field">
-          <label for="concurrency">最大并发处理数（1–5）</label>
-          <input id="concurrency" type="number" min="1" max="5" step="1" value="${config.maxConcurrency}" />
-          <small>等待期间可继续提交新文本，任务按顺序排队处理。</small>
+          <label for="concurrency">最大并发处理数（1–${config.maxConcurrency}）</label>
+          <input id="concurrency" type="number" min="1" max="${config.maxConcurrency}" step="1" value="${config.maxConcurrency}" />
+          <small>等待期间可继续提交新文本，任务按顺序排队处理。上限由环境变量 <code>MAX_CONCURRENCY</code> 决定，不能超过 ${config.maxConcurrency}。</small>
         </div>
       </div>
 
@@ -153,7 +153,7 @@ export function renderPage(env: PageEnv): string {
     </section>
 
     <section class="card composer">
-      <textarea id="input" spellcheck="false" placeholder="在此粘贴曲目信息，例如：&#10;歌名：淘汰&#10;歌手：陈奕迅&#10;专辑：认了吧&#10;时长：04:45&#10;歌曲链接：https://...&#10;封面链接：https://...&#10;&#10;也支持直接粘贴 JSON，例如 {&quot;name&quot;:&quot;淘汰&quot;,&quot;artist&quot;:&quot;陈奕迅&quot;,&quot;url&quot;:&quot;https://...&quot;,&quot;duration&quot;:285}&#10;可一次粘贴多首，提交后可立即继续粘贴下一段。"></textarea>
+      <textarea id="input" spellcheck="false" placeholder="在此粘贴曲目信息，例如：&#10;歌名：淘汰&#10;歌手：陈奕迅&#10;专辑：认了吧&#10;时长：04:45&#10;歌曲链接：https://...&#10;封面链接：https://...&#10;&#10;也支持直接粘贴 JSON，例如 {&quot;name&quot;:&quot;淘汰&quot;,&quot;artist&quot;:&quot;陈奕迅&quot;,&quot;url&quot;:&quot;https://...&quot;,&quot;duration&quot;:285}&#10;可一次粘贴多首，识别后自动加入下方列表，点「立即处理」才会提交后台。"></textarea>
       <div class="preview" id="preview">
         <div class="preview-title" id="preview-title">识别结果</div>
         <div class="preview-row" id="preview-row"></div>
@@ -163,8 +163,8 @@ export function renderPage(env: PageEnv): string {
           <button class="btn btn-ghost" id="sample" type="button">${ICONS.sparkles}<span>填入示例</span></button>
           <button class="btn btn-ghost" id="clear" type="button">清空</button>
         </div>
-        <div class="hint"><kbd>⌘</kbd><kbd>Enter</kbd> 提交 · 支持批量粘贴</div>
-        <button class="btn btn-primary" id="submit" type="button" disabled>${ICONS.download}<span>加入队列</span></button>
+        <div class="hint">粘贴即加入下方列表 · 点「立即处理」才提交后台 · <kbd>⌘</kbd><kbd>Enter</kbd> 同效</div>
+        <button class="btn btn-primary" id="submit" type="button" disabled>${ICONS.download}<span>立即处理</span></button>
       </div>
     </section>
 
@@ -201,8 +201,12 @@ ${runtime}${CLIENT_JS}
 </html>`;
 }
 
-function clampInt(value: string | undefined, min: number, max: number, fallback: number): number {
+/**
+ * 并发上限：完全由环境变量 MAX_CONCURRENCY 决定，页面只能在 1 ~ 该值之间调整。
+ * 这里不设上限（不替环境变量做主），只兜底非法值：留空 / 非数字 / 小于 1 时回落到默认值。
+ */
+export function concurrencyLimit(value: string | undefined): number {
   const n = Number.parseInt(value ?? '', 10);
-  if (Number.isNaN(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
+  if (Number.isNaN(n) || n < 1) return 2;
+  return n;
 }

@@ -13,11 +13,15 @@ export const CLIENT_JS = String.raw`
   var UNKNOWN_ARTIST = '未知歌手';
 
   var prefs = loadPrefs();
-  var concurrency = clampInt(prefs.concurrency || CONFIG.maxConcurrency || 2, 1, 5, 2);
+  // 并发上限完全来自环境变量 MAX_CONCURRENCY（由 Worker 注入），页面可以在 1 ~ 上限之间调整；
+  // 这里不额外封顶，只对缺值/非法值兜底到 2。
+  var concLimit = clampInt(CONFIG.maxConcurrency, 1, Number.MAX_SAFE_INTEGER, 2);
+  var concurrency = clampInt(prefs.concurrency || concLimit, 1, concLimit, concLimit);
   var apiOverride = prefs.apiBaseUrl || '';
   var allowOverride = CONFIG.allowApiOverride === true;
   var tasks = [];
   var batchBusy = false;
+  var inputHasSongs = false;
 
   var aria = {
     enabled: (prefs.aria && prefs.aria.enabled) === true,
@@ -154,36 +158,39 @@ export const CLIENT_JS = String.raw`
     return out;
   }
 
-  function parseText(text) {
-    var raw = String(text || '').trim();
-    if (!raw) return [];
+  function isJsonDoc(raw) {
+    var s = String(raw || '').trim();
+    return (s.startsWith('[') && s.endsWith(']')) || (s.startsWith('{') && s.endsWith('}'));
+  }
 
-    // 1. 尝试直接解析为 JSON（适配类似你提供的 JSON 数组或对象样式）
-    if ((raw.startsWith('[') && raw.endsWith(']')) || (raw.startsWith('{') && raw.endsWith('}'))) {
-      try {
-        var parsedJson = JSON.parse(raw);
-        var jsonArr = Array.isArray(parsedJson) ? parsedJson : [parsedJson];
-        var jsonSongs = [];
-        for (var k = 0; k < jsonArr.length; k++) {
-          var item = jsonArr[k];
-          if (!item || typeof item !== 'object') continue;
-          jsonSongs.push({
-            title: item.name || item.title || '',
-            artist: arrayToText(item.artist) || '',
-            album: item.album || '',
-            file_url: safeUrl(item.url || item.file_url || ''),
-            cover_url: safeUrl(item.pic || item.cover_url || ''),
-            duration: toSeconds(item.duration),
-            raw: JSON.stringify(item, null, 2)
-          });
-        }
-        if (jsonSongs.length > 0) return jsonSongs;
-      } catch (e) {
-        // 如果 JSON 解析失败，则降级继续走原有的文本块解析逻辑
+  // JSON 整段解析（单个对象或数组），失败或没有可用条目时返回空数组
+  function songsFromJson(raw) {
+    if (!isJsonDoc(raw)) return [];
+    try {
+      var parsedJson = JSON.parse(String(raw).trim());
+      var jsonArr = Array.isArray(parsedJson) ? parsedJson : [parsedJson];
+      var jsonSongs = [];
+      for (var k = 0; k < jsonArr.length; k++) {
+        var item = jsonArr[k];
+        if (!item || typeof item !== 'object') continue;
+        jsonSongs.push({
+          title: item.name || item.title || '',
+          artist: arrayToText(item.artist) || '',
+          album: item.album || '',
+          file_url: safeUrl(item.url || item.file_url || ''),
+          cover_url: safeUrl(item.pic || item.cover_url || ''),
+          duration: toSeconds(item.duration),
+          raw: JSON.stringify(item, null, 2)
+        });
       }
+      return jsonSongs;
+    } catch (e) {
+      // 解析失败则降级走纯文本块逻辑
+      return [];
     }
+  }
 
-    // 2. 原有的纯文本多行解析逻辑
+  function parseBlocks(raw) {
     var blocks = splitBlocks(raw);
     var songs = [];
     for (var i = 0; i < blocks.length; i++) {
@@ -194,12 +201,55 @@ export const CLIENT_JS = String.raw`
     return songs;
   }
 
+  function parseText(text) {
+    var raw = String(text || '').trim();
+    if (!raw) return [];
+
+    // 1. 尝试直接解析为 JSON（适配类似你提供的 JSON 数组或对象样式）
+    var jsonSongs = songsFromJson(raw);
+    if (jsonSongs.length > 0) return jsonSongs;
+
+    // 2. 纯文本多行解析
+    return parseBlocks(raw);
+  }
+
+  // 供自动入队使用：找出「已经可以入队」的曲目，并带回它们对应的原始文本块
+  function detectSongs(raw) {
+    var text = String(raw || '');
+    if (!text.trim()) return { songs: [], blocks: [] };
+
+    var jsonSongs = songsFromJson(text);
+    if (jsonSongs.length > 0) {
+      // JSON 是整块文本，无法按条切走，所以只在至少有一条可用时才一次性收走，
+      // 全部都没有链接（典型场景：粘贴了搜索结果）时留在输入框里，由预览标红提示。
+      var usable = [], missing = 0;
+      for (var i = 0; i < jsonSongs.length; i++) {
+        if (validate(jsonSongs[i])) missing++;
+        else usable.push(jsonSongs[i]);
+      }
+      return usable.length ? { songs: usable, blocks: [text.trim()], missing: missing } : { songs: [], blocks: [], missing: missing };
+    }
+
+    var blocks = splitBlocks(text);
+    var songs = [], used = [];
+    for (var j = 0; j < blocks.length; j++) {
+      var s = parseBlock(blocks[j]);
+      // 还没有歌曲链接的块视为「没输完」，留在输入框里继续等
+      if (!s.file_url) continue;
+      songs.push(s);
+      used.push(blocks[j]);
+    }
+    return { songs: songs, blocks: used };
+  }
+
   function validate(song) {
     if (!song.file_url) return '未解析到「歌曲链接」，请检查文本是否包含可下载的音频地址';
     return '';
   }
 
   /* ---------------- 任务队列 ---------------- */
+  // 自动识别出来的曲目先进列表，状态是 pending，**不提交后台**；
+  // 只有点「立即处理」（startPending）才会转成 queued 并由 pump 真正发出请求。
   function enqueue(songs) {
     var added = 0, skipped = 0;
     for (var i = 0; i < songs.length; i++) {
@@ -215,9 +265,9 @@ export const CLIENT_JS = String.raw`
         file_url: s.file_url,
         duration: s.duration === undefined ? '' : s.duration,
         raw: s.raw || '',
-        status: 'queued',
+        status: 'pending',
         download_url: '',
-        message: '排队中',
+        message: '待处理',
         createdAt: Date.now(),
         expireAt: 0,
         expired: false
@@ -227,9 +277,36 @@ export const CLIENT_JS = String.raw`
     if (added) {
       render();
       save();
-      pump();
+      // 注意：这里不 pump，等用户点「立即处理」
     }
     return { added: added, skipped: skipped };
+  }
+
+  function hasPending() {
+    for (var i = 0; i < tasks.length; i++) if (tasks[i].status === 'pending') return true;
+    return false;
+  }
+
+  function countPending() {
+    var n = 0;
+    for (var i = 0; i < tasks.length; i++) if (tasks[i].status === 'pending') n++;
+    return n;
+  }
+
+  // 点「立即处理」后再真正开始：pending → queued
+  function startPending() {
+    var n = 0;
+    for (var i = 0; i < tasks.length; i++) {
+      if (tasks[i].status !== 'pending') continue;
+      tasks[i].status = 'queued';
+      tasks[i].message = '排队中';
+      n++;
+    }
+    if (!n) return 0;
+    render();
+    save();
+    pump();
+    return n;
   }
 
   function pump() {
@@ -319,7 +396,9 @@ export const CLIENT_JS = String.raw`
   }
 
   function clearFinished() {
-    tasks = tasks.filter(function (t) { return t.status === 'queued' || t.status === 'running'; });
+    tasks = tasks.filter(function (t) {
+      return t.status === 'pending' || t.status === 'queued' || t.status === 'running';
+    });
     render();
     save();
   }
@@ -601,15 +680,17 @@ export const CLIENT_JS = String.raw`
   }
 
   function renderStats() {
-    var s = { queued: 0, running: 0, done: 0, error: 0 };
+    var s = { pending: 0, queued: 0, running: 0, done: 0, error: 0 };
     for (var i = 0; i < tasks.length; i++) s[tasks[i].status]++;
     el.stats.innerHTML =
       '<span class="stat">共 <b>' + tasks.length + '</b></span>' +
+      '<span class="stat">待处理 <b>' + s.pending + '</b></span>' +
       '<span class="stat is-run">处理中 <b>' + (s.running + s.queued) + '</b></span>' +
       '<span class="stat is-done">已完成 <b>' + s.done + '</b></span>' +
       '<span class="stat is-err">失败 <b>' + s.error + '</b></span>';
     el.clearDone.disabled = s.done + s.error === 0;
     el.retryFailed.disabled = s.error === 0;
+    refreshSubmit();
 
     if (aria.enabled) {
       var pend = pushable().length;
@@ -619,6 +700,14 @@ export const CLIENT_JS = String.raw`
     }
   }
 
+  // 「立即处理」在两种情况下可用：列表里还有待处理的任务，或输入框里有能识别的内容
+  function refreshSubmit() {
+    var n = countPending();
+    el.submit.disabled = !n && !inputHasSongs;
+    var label = el.submit.querySelector('span');
+    if (label) label.textContent = n ? '立即处理 (' + n + ')' : '立即处理';
+  }
+
   function renderTask(t) {
     var cls = 'task' + (t.status === 'done' ? ' is-done' : t.status === 'error' ? ' is-error' : t.status === 'running' ? ' is-running' : '');
     var cover = t.cover_url
@@ -626,7 +715,8 @@ export const CLIENT_JS = String.raw`
       : '<div class="cover-fallback">' + ICON_MUSIC + '</div>';
 
     var side = '';
-    if (t.status === 'queued') side = '<span class="badge badge-queue"><i class="dot"></i>排队中</span>' + actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
+    if (t.status === 'pending') side = '<span class="badge badge-queue"><i class="dot"></i>待处理</span>' + actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
+    else if (t.status === 'queued') side = '<span class="badge badge-queue"><i class="dot"></i>排队中</span>' + actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
     else if (t.status === 'running') side = '<span class="badge badge-run"><i class="dot pulse"></i>生成中</span>' + actionBtn(t.id, 'remove', '移除', 'btn-ghost btn-icon', ICON_X);
     else if (t.status === 'done') {
       if (t.expired || (t.expireAt && Date.now() > t.expireAt)) {
@@ -716,6 +806,21 @@ export const CLIENT_JS = String.raw`
     if (typeof err === 'string') return err;
     return err.message || String(err);
   }
+
+  // 从原文里挖掉已入队的文本块，剩下的内容保持原样（兼容 ES5，不用 trimEnd）
+  function stripBlocks(raw, blocks) {
+    var out = String(raw);
+    for (var i = 0; i < blocks.length; i++) {
+      var idx = out.indexOf(blocks[i]);
+      if (idx >= 0) out = out.slice(0, idx) + out.slice(idx + blocks[i].length);
+    }
+    return out.replace(/\n{3,}/g, '\n\n').replace(/^[ \t]*\n/, '').replace(/\s+$/, '');
+  }
+
+  function caretToEnd() {
+    var len = el.input.value.length;
+    try { el.input.setSelectionRange(len, len); } catch (e) { /* 某些输入类型不支持 */ }
+  }
   function find(id) {
     for (var i = 0; i < tasks.length; i++) if (tasks[i].id === id) return tasks[i];
     return null;
@@ -737,7 +842,8 @@ export const CLIENT_JS = String.raw`
   function save() {
     try {
       var data = tasks
-        .filter(function (t) { return t.status === 'done' || t.status === 'error'; })
+        // pending 也要留下：刷新后仍停在列表里等你点「立即处理」
+        .filter(function (t) { return t.status === 'pending' || t.status === 'done' || t.status === 'error'; })
         .slice(-50)
         .map(function (t) {
           return {
@@ -759,8 +865,15 @@ export const CLIENT_JS = String.raw`
       var data = JSON.parse(raw);
       if (!Array.isArray(data)) return;
       tasks = data.filter(function (t) { return t && t.id && t.file_url; }).map(function (t) {
-        t.expired = t.status === 'done' && t.expireAt && Date.now() > t.expireAt;
-        if (t.expired) t.message = '链接已过期，可重新生成';
+        // 早期版本可能存了 queued/running，统一回到 pending，等用户点「立即处理」
+        if (t.status !== 'done' && t.status !== 'error') {
+          t.status = 'pending';
+          t.message = '待处理';
+          t.download_url = '';
+        } else {
+          t.expired = t.status === 'done' && t.expireAt && Date.now() > t.expireAt;
+          if (t.expired) t.message = '链接已过期，可重新生成';
+        }
         return t;
       });
     } catch (e) { tasks = []; }
@@ -775,13 +888,16 @@ export const CLIENT_JS = String.raw`
   }
 
   /* ---------------- 事件 ---------------- */
-  el.input.addEventListener('input', updatePreview);
-
-  el.input.addEventListener('keydown', function (e) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); submit(); }
+  el.input.addEventListener('input', function () {
+    updatePreview();
+    scheduleAutoEnqueue();
   });
 
-  el.submit.addEventListener('click', submit);
+  el.input.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); flushAutoEnqueue(); }
+  });
+
+  el.submit.addEventListener('click', flushAutoEnqueue);
 
   el.clear.addEventListener('click', function () {
     el.input.value = '';
@@ -789,10 +905,12 @@ export const CLIENT_JS = String.raw`
     el.input.focus();
   });
 
+  // 「填入示例」后也走自动识别，示例文本会直接落到队列里
   el.sample.addEventListener('click', function () {
     el.input.value = SAMPLE_TEXT;
     updatePreview();
     el.input.focus();
+    scheduleAutoEnqueue();
   });
 
   el.list.addEventListener('click', function (e) {
@@ -827,18 +945,31 @@ export const CLIENT_JS = String.raw`
     toast(aria.enabled ? '已启用 Aria2 批量下载' : '已关闭 Aria2 批量下载', 'ok');
   });
 
+  function setSettingsOpen(open) {
+    el.settings.classList.toggle('show', open);
+    el.settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
   el.settingsBtn.addEventListener('click', function () {
-    el.settings.classList.toggle('show');
+    setSettingsOpen(!el.settings.classList.contains('show'));
   });
 
   el.saveSettings.addEventListener('click', function () {
     apiOverride = (el.apiInput.value || '').trim();
-    concurrency = clampInt(el.concInput.value, 1, 5, 2);
-    prefs.apiBaseUrl = apiOverride;
+    // 页面可以改并发，但不能超过环境变量给的上限
+    var wanted = parseInt(el.concInput.value, 10);
+    concurrency = clampInt(el.concInput.value, 1, concLimit, concLimit);
     prefs.concurrency = concurrency;
+    el.concInput.value = String(concurrency);
     persistAria();
     savePrefs();
-    toast('设置已保存', 'ok');
+    // 保存完直接把面板收回原来的位置
+    setSettingsOpen(false);
+    if (!isNaN(wanted) && wanted > concLimit) {
+      toast('并发数超过环境变量上限 ' + concLimit + '，已按上限处理', 'err');
+    } else {
+      toast('设置已保存', 'ok');
+    }
     pump();
   });
 
@@ -859,9 +990,16 @@ export const CLIENT_JS = String.raw`
   }, 1000);
 
   function updatePreview() {
+    if (!el.input.value.trim()) {
+      inputHasSongs = false;
+      el.preview.classList.remove('show');
+      refreshSubmit();
+      return;
+    }
     var songs = parseText(el.input.value);
-    if (!el.input.value.trim()) { el.preview.classList.remove('show'); el.submit.disabled = true; return; }
-    el.submit.disabled = songs.length === 0;
+    // 只有「已能入队」的才会让按钮可用；仅有条目但缺链接的仍然留在预览里标红
+    inputHasSongs = detectSongs(el.input.value).songs.length > 0;
+    refreshSubmit();
     if (!songs.length) { el.preview.classList.remove('show'); return; }
 
     el.previewTitle.textContent = songs.length > 1
@@ -887,18 +1025,53 @@ export const CLIENT_JS = String.raw`
     el.preview.classList.add('show');
   }
 
-  function submit() {
-    var text = el.input.value;
-    if (!text.trim()) { toast('请先粘贴文本', 'err'); return; }
-    var songs = parseText(text);
-    if (!songs.length) { toast('未能从文本中识别出歌曲信息', 'err'); return; }
-    var r = enqueue(songs);
-    if (r.added) {
-      el.input.value = '';
-      updatePreview();
-      el.input.focus();
-      toast('已加入队列：' + r.added + ' 个任务', 'ok');
+  /* ---------------- 自动入队 ---------------- */
+  // 输入框里的内容一旦被识别成可下载的曲目，就自动进下方队列；
+  // 已入队的那部分文本会从输入框里挖走，没识别完的（比如还缺歌曲链接）继续留在框里等待补全。
+  var AUTO_DELAY = 600;
+  var autoTimer = null;
+
+  function scheduleAutoEnqueue() {
+    if (autoTimer) window.clearTimeout(autoTimer);
+    autoTimer = window.setTimeout(function () {
+      autoTimer = null;
+      autoEnqueue(false);
+    }, AUTO_DELAY);
+  }
+
+  // 点「立即处理」/ ⌘Enter：先把输入框里剩下的识别出来，再统一提交后台
+  function flushAutoEnqueue() {
+    if (autoTimer) { window.clearTimeout(autoTimer); autoTimer = null; }
+    var got = autoEnqueue(true);
+    var started = startPending();
+    if (started) toast('已开始处理 ' + started + ' 个任务', 'ok');
+    else if (!got) toast('列表里没有待处理的任务', 'err');
+  }
+
+  function autoEnqueue(force) {
+    var raw = el.input.value;
+    if (!raw.trim()) return false;
+
+    var hit = detectSongs(raw);
+
+    if (!hit.songs.length) {
+      if (!force) return false;
+      // 手动触发时给出明确原因：识别到了条目但缺链接 → 走 enqueue 输出具体报错
+      var all = parseText(raw);
+      if (all.length) { enqueue(all); return false; }
+      toast('未能从文本中识别出歌曲信息', 'err');
+      return false;
     }
+
+    var r = enqueue(hit.songs);
+    if (!r.added) return false;
+
+    el.input.value = stripBlocks(raw, hit.blocks);
+    caretToEnd();
+    updatePreview();
+    if (!force) toast('已加入列表：' + r.added + ' 首，点「立即处理」开始', 'ok');
+    if (hit.missing) toast('另有 ' + hit.missing + ' 条缺少歌曲链接，未加入队列', 'err');
+    return true;
   }
 
   /* ---------------- 启动 ---------------- */

@@ -7,7 +7,7 @@
  *   POST /api/process   代理转发到真实后端（规避 CORS、隐藏后端地址）
  */
 
-import { renderPage } from './page';
+import { concurrencyLimit, renderPage } from './page';
 
 export interface Env {
   /** 后端根地址，例如 https://api.example.com（建议用 secret 配置） */
@@ -18,7 +18,7 @@ export interface Env {
   API_TOKEN?: string;
   /** 代理请求超时（毫秒），默认 120000 */
   API_TIMEOUT_MS?: string;
-  /** 前端最大并发数，默认 2 */
+  /** 前端最大并发数，取环境变量 MAX_CONCURRENCY，缺省 2 */
   MAX_CONCURRENCY?: string;
   /** 是否允许页面临时覆盖后端地址（调试用，生产建议 false） */
   ALLOW_API_OVERRIDE?: string;
@@ -49,7 +49,7 @@ export default {
         request,
         json({
           allowApiOverride: env.ALLOW_API_OVERRIDE === 'true',
-          maxConcurrency: clampInt(env.MAX_CONCURRENCY, 1, 5, 2),
+          maxConcurrency: concurrencyLimit(env.MAX_CONCURRENCY),
           backendConfigured: Boolean(env.API_BASE_URL)
         })
       );
