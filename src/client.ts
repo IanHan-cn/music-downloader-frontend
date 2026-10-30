@@ -119,7 +119,35 @@ export const CLIENT_JS = String.raw`
   }
 
   function parseText(text) {
-    var blocks = splitBlocks(text);
+    var raw = String(text || '').trim();
+    if (!raw) return [];
+
+    // 1. 尝试直接解析为 JSON（适配类似你提供的 JSON 数组或对象样式）
+    if ((raw.startsWith('[') && raw.endsWith(']')) || (raw.startsWith('{') && raw.endsWith('}'))) {
+      try {
+        var parsedJson = JSON.parse(raw);
+        var jsonArr = Array.isArray(parsedJson) ? parsedJson : [parsedJson];
+        var jsonSongs = [];
+        for (var k = 0; k < jsonArr.length; k++) {
+          var item = jsonArr[k];
+          if (!item || typeof item !== 'object') continue;
+          jsonSongs.push({
+            title: item.name || item.title || '',
+            artist: item.artist || '',
+            album: item.album || '',
+            file_url: safeUrl(item.url || item.file_url || ''),
+            cover_url: safeUrl(item.pic || item.cover_url || ''),
+            raw: JSON.stringify(item, null, 2)
+          });
+        }
+        if (jsonSongs.length > 0) return jsonSongs;
+      } catch (e) {
+        // 如果 JSON 解析失败，则降级继续走原有的文本块解析逻辑
+      }
+    }
+
+    // 2. 原有的纯文本多行解析逻辑
+    var blocks = splitBlocks(raw);
     var songs = [];
     for (var i = 0; i < blocks.length; i++) {
       var s = parseBlock(blocks[i]);
